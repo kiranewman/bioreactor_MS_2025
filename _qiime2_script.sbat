@@ -1,0 +1,67 @@
+#!/bin/bash
+# directives that convey submission options:
+#SBATCH --job-name=jobsbat1
+#SBATCH --account=kinewman99
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=6
+###SBATCH --mem-per-cpu=12g
+#SBATCH --mem=90g
+#SBATCH --time=14-00:00:00
+###SBATCH --output=/nfs/turbo/umms-kinewman2/bioreactor
+###SBATCH --mail-type=END,FAI
+#SBATCH --mail-type=NONE
+#####################################################################
+# The application(s) to execute along with its input arguments and options:
+module load Bioinformatics  python3.9-anaconda seqkit
+conda activate qiime2-amplicon-2024.5
+my_job_header
+echo Running the following command ${SLURM_CPUS_PER_TASK}
+
+
+qiime tools import   --type 'SampleData[PairedEndSequencesWithQuality]'   --input-path fastq_data   --input-format CasavaOneEightSingleLanePerSampleDirFmt   --output-path demux-paired-end.qza
+qiime dada2 denoise-single   --i-demultiplexed-seqs demux-paired-end.qza   --p-trim-left 0   --p-trunc-len 250   --o-representative-sequences rep-seqs-dada2.qza   --o-table table-dada2.qza   --o-denoising-stats stats-dada2.qza
+
+cp table-dada2.qza table.qza
+cp rep-seqs-dada2.qza rep-seqs.qza
+
+qiime feature-table summarize   --i-table table.qza   --o-visualization table.qzv   --m-sample-metadata-file sample-metadata.tsv
+qiime feature-table tabulate-seqs   --i-data rep-seqs.qza   --o-visualization rep-seqs.qzv
+qiime phylogeny align-to-tree-mafft-fasttree   --i-sequences rep-seqs.qza   --o-alignment aligned-rep-seqs.qza   --o-masked-alignment masked-aligned-rep-seqs.qza   --o-tree unrooted-tree.qza   --o-rooted-tree rooted-tree.qza
+
+qiime diversity core-metrics-phylogenetic   --i-phylogeny rooted-tree.qza   --i-table table.qza   --p-sampling-depth 1103   --m-metadata-file sample-metadata.tsv   --output-dir core-metrics-results
+qiime diversity alpha-group-significance   --i-alpha-diversity core-metrics-results/faith_pd_vector.qza   --m-metadata-file sample-metadata.tsv   --o-visualization core-metrics-results/faith-pd-group-significance.qzv
+qiime diversity alpha-group-significance   --i-alpha-diversity core-metrics-results/evenness_vector.qza   --m-metadata-file sample-metadata.tsv   --o-visualization core-metrics-results/evenness-group-significance.qzv
+qiime diversity beta-group-significance   --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza   --m-metadata-file sample-metadata.tsv   --m-metadata-column group1   --o-visualization core-metrics-results/unweighted-unifrac-combination-significance.qzv   --p-pairwise
+
+
+
+qiime emperor plot   --i-pcoa core-metrics-results/unweighted_unifrac_pcoa_results.qza   --m-metadata-file sample-metadata.tsv    --o-visualization core-metrics-results/unweighted-unifrac.qzv
+qiime emperor plot   --i-pcoa core-metrics-results/bray_curtis_pcoa_results.qza   --m-metadata-file sample-metadata.tsv     --o-visualization core-metrics-results/bray-curtis.qzv
+
+
+
+qiime diversity alpha-rarefaction   --i-table table.qza   --i-phylogeny rooted-tree.qza   --p-max-depth 4000   --m-metadata-file sample-metadata.tsv   --o-visualization alpha-rarefaction.qzv
+qiime feature-classifier classify-sklearn   --i-classifier greengenes/2022.10.backbone.v4.nb.sklearn-1.4.2.qza   --i-reads rep-seqs.qza   --o-classification taxonomy.qza
+qiime taxa barplot   --i-table table.qza   --i-taxonomy taxonomy.qza   --m-metadata-file sample-metadata.tsv   --o-visualization taxa-bar-plots.qzv
+
+qiime feature-table transpose --i-table table.qza --o-transposed-feature-table taxa-bar-plots/asv/transposed-table.qza
+qiime metadata tabulate --m-input-file rep-seqs.qza --m-input-file taxonomy.qza --m-input-file transposed-table.qza --o-visualization merged_asv_data.qzv
+
+qiime feature-table transpose --i-table table.qza --o-transposed-feature-table transposed-table.qza
+qiime metadata tabulate --m-input-file rep-seqs.qza --m-input-file taxonomy.qza --m-input-file transposed-table.qza --o-visualization merged_asv_data.qzv
+
+mkdir taxonomic
+for i in {2..7}; do qiime taxa collapse --i-table table.qza --i-taxonomy taxonomy.qza --p-level $i --o-collapsed-table taxonomic/$i'.qza'; done
+qiime feature-table relative-frequency --i-table table.qza --o-relative-frequency-table  taxonomic/relative_abundance_8.qza
+for i in {2..8}; do qiime feature-table relative-frequency --i-table taxonomic/$i'.qza' --o-relative-frequency-table taxonomic/relative_abundance_$i.qza;done
+
+for i in {2..8}; do qiime tools export --input-path taxonomic/relative_abundance_$i.qza --output-path taxonomic/temp; mv taxonomic/temp/feature-table.biom taxonomic/$i.biom ;done
+for i in {2..8}; do biom convert -i taxonomic/$i.biom -o taxonomic/$i.tsv --to-tsv ;done
+
+qiime tools export --input-path merged_asv_data.qzv --output-path taxonomic/temp/8
+cat taxonomic/temp/8/metadata.tsv | cut -f 1-3 >taxonomic/temp/8/13metadata.tsv
+paste taxonomic/temp/8/13metadata.tsv taxonomic/8.tsv >taxonomic/merged8.tsv 
+
